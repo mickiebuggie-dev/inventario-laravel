@@ -1,45 +1,22 @@
-# Dockerfile
-
 FROM php:8.2-fpm
 
-# Instalar dependencias del sistema
+# Instalar extensiones necesarias
 RUN apt-get update && apt-get install -y \
-    build-essential \
-    libpng-dev \
-    libjpeg-dev \
-    libonig-dev \
-    libxml2-dev \
-    zip \
-    unzip \
-    curl \
-    git \
-    libzip-dev \
-    libpq-dev \
-    libfreetype6-dev \
-    libjpeg62-turbo-dev \
-    libpng-dev \
-    libmcrypt-dev \
-    nano \
-    libmagickwand-dev \
-    && docker-php-ext-install pdo pdo_mysql mbstring zip exif pcntl bcmath
+    libpng-dev libjpeg-dev libfreetype6-dev zip unzip curl git nano \
+    libonig-dev libxml2-dev libzip-dev \
+    && docker-php-ext-install pdo_mysql mbstring zip exif pcntl bcmath gd
 
 # Instalar Composer
 COPY --from=composer:latest /usr/bin/composer /usr/bin/composer
 
-# Crear directorio de trabajo
 WORKDIR /var/www
 
-# Copiar archivos
 COPY . .
 
-# Instalar dependencias PHP
-RUN composer install --no-dev --optimize-autoloader
+RUN composer install --no-dev --optimize-autoloader \
+    && chown -R www-data:www-data /var/www \
+    && chmod -R 755 /var/www
 
-# Permisos
-RUN chown -R www-data:www-data /var/www && chmod -R 755 /var/www
-
-# Puerto para Render
 EXPOSE 8080
 
-# Comando para iniciar Laravel con built-in server
 CMD php artisan serve --host=0.0.0.0 --port=8080
