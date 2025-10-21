@@ -1,7 +1,6 @@
-# PHP 8.2 + Apache
-FROM php:8.2-apache
+# ---------- STAGE 1: runtime PHP + Apache
+FROM php:8.2-apache AS runtime
 
-# Paquetes del sistema y extensiones PHP necesarias (incluye bcmath)
 RUN apt-get update && apt-get install -y \
     git curl zip unzip libonig-dev libzip-dev \
     libpng-dev libjpeg-dev libfreetype6-dev \
@@ -9,19 +8,17 @@ RUN apt-get update && apt-get install -y \
     && docker-php-ext-install pdo pdo_mysql mbstring zip exif pcntl bcmath gd \
     && a2enmod rewrite
 
-# Composer desde imagen oficial
+# Composer
 COPY --from=composer:latest /usr/bin/composer /usr/bin/composer
 
-# Código
 WORKDIR /var/www/html
 COPY . .
 
-# Instalar dependencias de Laravel
+# Dependencias PHP (prod)
 RUN composer install --no-dev --optimize-autoloader
 
-# VirtualHost apuntando a /public y AllowOverride On
+# VirtualHost -> /public
 RUN printf "<VirtualHost *:80>\n\
-    ServerAdmin webmaster@localhost\n\
     DocumentRoot /var/www/html/public\n\
     <Directory /var/www/html/public>\n\
         AllowOverride All\n\
@@ -33,14 +30,31 @@ RUN printf "<VirtualHost *:80>\n\
 
 # Permisos
 RUN chown -R www-data:www-data /var/www/html \
-    && chmod -R 755 storage bootstrap/cache
+    && chmod -R 775 storage bootstrap/cache
 
-# Script de arranque: ajusta Apache al $PORT, migra y lanza
+# Script de arranque
 COPY docker/start.sh /usr/local/bin/start.sh
 RUN chmod +x /usr/local/bin/start.sh
 
-# Exponer un puerto "default" (Render usará $PORT igualmente)
 EXPOSE 8080
-
-# Arranque
 CMD ["/usr/local/bin/start.sh"]
+
+
+# ---------- STAGE 2: build de assets con Node
+FROM node:20-alpine AS assets
+WORKDIR /app
+
+# Primero package*.json para cache
+COPY package*.json ./
+RUN npm ci || npm install
+
+# Copiamos todo lo necesario para Vite
+COPY . .
+
+# Compilar assets (genera public/build/manifest.json)
+RUN npm run build
+
+
+# ---------- STAGE 3: unir assets compilados al runtime
+FROM runtime AS final
+COPY --from=assets /app/public/build /var/www/html/public/build
