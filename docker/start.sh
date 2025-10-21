@@ -1,59 +1,63 @@
-#!/usr/bin/env bash
-# docker/start.sh
-# Arranque para Laravel en Render (Apache). Hace warm-up, reintenta migraciones y lanza Apache.
+# ---------- STAGE 1: PHP + Apache (runtime)
+FROM php:8.2-apache AS runtime
 
-set -e
+# Extensiones necesarias (incluye bcmath, gd, zip, pdo_mysql) y rewrite
+RUN apt-get update && apt-get install -y \
+    git curl zip unzip libonig-dev libzip-dev \
+    libpng-dev libjpeg-dev libfreetype6-dev \
+    && docker-php-ext-configure gd --with-freetype --with-jpeg \
+    && docker-php-ext-install pdo pdo_mysql mbstring zip exif pcntl bcmath gd \
+    && a2enmod rewrite
 
-# Render inyecta $PORT; si no existe, usa 8080
-: "${PORT:=8080}"
+# Composer
+COPY --from=composer:latest /usr/bin/composer /usr/bin/composer
 
-echo "[start] Booting with PORT=${PORT}"
+WORKDIR /var/www/html
+COPY . .
 
-# Hacer que Apache escuche en $PORT
-sed -ri "s/Listen 80/Listen ${PORT}/" /etc/apache2/ports.conf
-sed -ri "s/:80>/:${PORT}>/g" /etc/apache2/sites-available/000-default.conf
+# Instalar dependencias PHP (prod)
+RUN composer install --no-dev --optimize-autoloader
 
-# Crear archivo de healthcheck simple
-mkdir -p /var/www/html/public/.well-known
-echo "ok" > /var/www/html/public/.well-known/health
+# VirtualHost apuntando a /public
+RUN printf "<VirtualHost *:80>\n\
+    DocumentRoot /var/www/html/public\n\
+    <Directory /var/www/html/public>\n\
+        AllowOverride All\n\
+        Require all granted\n\
+    </Directory>\n\
+    ErrorLog \${APACHE_LOG_DIR}/error.log\n\
+    CustomLog \${APACHE_LOG_DIR}/access.log combined\n\
+</VirtualHost>\n" > /etc/apache2/sites-available/000-default.conf
 
-# Warm-up de Laravel (sin route:cache porque hay closures en rutas)
-echo "[start] Laravel warm-up (permisos, caches)..."
-mkdir -p storage/framework/{cache,sessions,views}
-chown -R www-data:www-data storage bootstrap/cache
-chmod -R 775 storage bootstrap/cache
+# Permisos
+RUN chown -R www-data:www-data /var/www/html \
+    && chmod -R 775 storage bootstrap/cache
 
-php artisan storage:link || true
-php artisan config:clear || true
-php artisan view:clear   || true
-php artisan config:cache || true
-php artisan view:cache   || true
+# Script de arranque (el que ya tienes)
+COPY docker/start.sh /usr/local/bin/start.sh
+RUN chmod +x /usr/local/bin/start.sh
 
-# Mostrar variables clave para diagnosticar en logs
-echo "[start] DB_HOST=${DB_HOST} DB_PORT=${DB_PORT} DB_DATABASE=${DB_DATABASE} DB_USERNAME=${DB_USERNAME}"
+EXPOSE 8080
+CMD ["/usr/local/bin/start.sh"]
 
-# Reintentos de migración (espera a que la BD esté lista)
-ATTEMPTS="${MIGRATE_ATTEMPTS:-20}"   # configurable por env si quieres (default 20)
-SLEEP_SECS="${MIGRATE_WAIT_SECONDS:-5}" # configurable por env si quieres (default 5s)
 
-i=1
-while [ "$i " -le "$ATTEMPTS" ]; do
-  echo "[start] Running migrations (attempt ${i}/${ATTEMPTS})..."
-  if php artisan migrate --force --no-interaction; then
-    echo "[start] Migrations OK ✅"
-    break
-  else
-    echo "[start] Migrations failed. Retrying in ${SLEEP_SECS}s..."
-    sleep "${SLEEP_SECS}"
-    i=$((i+1))
-  fi
-done
+# ---------- STAGE 2: Build de assets con Node (solo en build)
+FROM node:20-alpine AS assets
 
-# Seed opcional controlado por variable de entorno RUN_SEED=1 (ejecútalo una sola vez y quítalo)
-if [ "${RUN_SEED:-0}" = "1" ]; then
-  echo "[start] Running db:seed (RUN_SEED=1)..."
-  php artisan db:seed --force --no-interaction || true
-fi
+WORKDIR /app
+# Copiamos package.json/lock primero para aprovechar cache
+COPY package*.json ./
+# Dependencias de front (usa ci si hay lock; si no, instala normal)
+RUN npm ci || npm install
 
-echo "[start] Starting Apache…"
-exec apache2-foreground
+# Copiamos el resto del proyecto necesario para Vite
+COPY . .
+
+# Compila a /public/build usando laravel-vite-plugin
+RUN npm run build
+
+
+# ---------- STAGE 3: Unimos assets compilados al runtime
+FROM runtime AS final
+# Copia la carpeta build generada por Vite
+COPY --from=assets /app/public/build /var/www/html/public/build
