@@ -1,30 +1,46 @@
-# Usa PHP 8.2 con FPM
-FROM php:8.2-fpm
+# PHP 8.2 + Apache
+FROM php:8.2-apache
 
-# Instalar dependencias de sistema y extensiones de PHP
+# Paquetes del sistema y extensiones PHP necesarias (incluye bcmath)
 RUN apt-get update && apt-get install -y \
-    git curl zip unzip libpng-dev libjpeg-dev libfreetype6-dev libonig-dev libzip-dev \
+    git curl zip unzip libonig-dev libzip-dev \
+    libpng-dev libjpeg-dev libfreetype6-dev \
     && docker-php-ext-configure gd --with-freetype --with-jpeg \
-    && docker-php-ext-install pdo pdo_mysql mbstring zip exif pcntl bcmath gd
+    && docker-php-ext-install pdo pdo_mysql mbstring zip exif pcntl bcmath gd \
+    && a2enmod rewrite
 
-# Instalar Composer
+# Composer desde imagen oficial
 COPY --from=composer:latest /usr/bin/composer /usr/bin/composer
 
-# Establecer directorio de trabajo
-WORKDIR /var/www
-
-# Copiar todos los archivos del proyecto
+# Código
+WORKDIR /var/www/html
 COPY . .
 
-# Instalar dependencias de Laravel (sin desarrollo, optimizado)
+# Instalar dependencias de Laravel
 RUN composer install --no-dev --optimize-autoloader
 
-# Asignar permisos necesarios
-RUN chown -R www-data:www-data /var/www \
-    && chmod -R 755 /var/www/storage /var/www/bootstrap/cache
+# VirtualHost apuntando a /public y AllowOverride On
+RUN printf "<VirtualHost *:80>\n\
+    ServerAdmin webmaster@localhost\n\
+    DocumentRoot /var/www/html/public\n\
+    <Directory /var/www/html/public>\n\
+        AllowOverride All\n\
+        Require all granted\n\
+    </Directory>\n\
+    ErrorLog \${APACHE_LOG_DIR}/error.log\n\
+    CustomLog \${APACHE_LOG_DIR}/access.log combined\n\
+</VirtualHost>\n" > /etc/apache2/sites-available/000-default.conf
 
-# Puerto expuesto
-EXPOSE 9000
+# Permisos
+RUN chown -R www-data:www-data /var/www/html \
+    && chmod -R 755 storage bootstrap/cache
 
-# Ejecutar migraciones y luego iniciar PHP-FPM
-CMD php artisan migrate --force && php-fpm
+# Script de arranque: ajusta Apache al $PORT, migra y lanza
+COPY docker/start.sh /usr/local/bin/start.sh
+RUN chmod +x /usr/local/bin/start.sh
+
+# Exponer un puerto "default" (Render usará $PORT igualmente)
+EXPOSE 8080
+
+# Arranque
+CMD ["/usr/local/bin/start.sh"]
