@@ -8,7 +8,6 @@ RUN apt-get update && apt-get install -y \
     && docker-php-ext-install pdo pdo_mysql mbstring zip exif pcntl bcmath gd \
     && a2enmod rewrite
 
-# Composer
 COPY --from=composer:latest /usr/bin/composer /usr/bin/composer
 
 WORKDIR /var/www/html
@@ -40,18 +39,26 @@ EXPOSE 8080
 CMD ["/usr/local/bin/start.sh"]
 
 
-# ---------- STAGE 2: build de assets con Node
-FROM node:20-alpine AS assets
+# ---------- STAGE 2: build de assets con Node (Vite)
+# Usa Node 18 LTS para evitar conflictos de peer deps
+FROM node:18-alpine AS assets
 WORKDIR /app
 
-# Primero package*.json para cache
-COPY package*.json ./
-RUN npm ci || npm install
+# variables para reducir ruido y conflictos
+ENV NPM_CONFIG_FUND=false \
+    NPM_CONFIG_AUDIT=false
 
-# Copiamos todo lo necesario para Vite
+# Copiamos sólo los manifests primero para cache
+COPY package*.json ./
+
+# 1) Si hay package-lock.json, npm ci puede fallar si se generó con otra versión de npm
+# 2) Forzamos legacy-peer-deps para resolver conflictos de plugins
+RUN npm ci --legacy-peer-deps || npm install --legacy-peer-deps
+
+# Copiamos el resto del proyecto necesario para Vite
 COPY . .
 
-# Compilar assets (genera public/build/manifest.json)
+# Compila (genera public/build/manifest.json)
 RUN npm run build
 
 
